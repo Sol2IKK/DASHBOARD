@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RTIC Dashboard — YPF Supply Chain</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>* { margin: 0; padding: 0; box-sizing: border-box; } body { background: #e8ecf1; }</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useEffect } = React;
+
+const SUPABASE_URL      = "https://peaodwkxqlrpliaomxqf.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_75bMNKwcJEBzk8kl5L4PWQ_JWp8mPDd";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ─── Los 3 tableros independientes ─── */
+const TABLEROS = [
+ { id:"avance1", label:"Avance 1", titulo:"AVANCE 1 — PANTALLAS" },
+ { id:"avance2", label:"Avance 2", titulo:"AVANCE 2 — PANTALLAS" },
+ { id:"avance3", label:"Avance 3", titulo:"AVANCE 3 — PANTALLAS" },
+];
+
+const TEAM = [
+ { id:"zsosa",     name:"Zahi Sosa" },
+ { id:"jsanda",    name:"Juli Sanda" },
+ { id:"fchavez",   name:"Flor Chavez" },
+ { id:"lnegri",    name:"Luciano Negri" },
+ { id:"hambrosio", name:"Hernan Ambrosio" },
+ { id:"pcosta",    name:"Pedro/Costa" },
+];
+
+const ETAPAS_LISTA = [
+ "Etapa 1 — Entender demanda futura",
+ "Etapa 2 — Analizar mercado/oferta",
+ "Etapa 3 — Planificar sourcing",
+ "Etapa 4 — Abastecer, negociar y seleccionar",
+ "Etapa 5 — Implementar servicios a las operaciones",
+ "Etapa 6 — Evaluar rendimiento de proveedores",
+ "Etapa 7 — Desarrollar nuevos proveedores",
+ "DATACENTER (mock up visual)",
+ "DATACENTER (desarrollo)",
+ "TEMPLATE (mock up visual)",
+ "Otro",
+];
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+const C = {
+ navy:"#0c1525", nl:"#131d30", teal:"#00bcd4", td:"#0097a7",
+ gold:"#e8a838", grn:"#2e7d32", gl:"#4caf50",
+ red:"#c62828",  rl:"#ef5350", w:"#fff",
+ g:"#8a9bb5",    gl2:"#b0bec5", bd:"rgba(0,188,212,0.15)"
+};
+
+/* ═══════════════ Supabase helpers (scoped por tablero) ═══════════════ */
+async function dbLoadPantallas(tablero) {
+ const { data, error } = await sb
+   .from("pantallas_cronograma")
+   .select("*")
+   .eq("tablero", tablero)
+   .eq("deleted", false)
+   .order("orden");
+ if (error) throw error;
+ return data || [];
+}
+async function dbUpsertPantalla(id, fields) {
+ const { error } = await sb.from("pantallas_cronograma").upsert(
+   { id, ...fields, updated_at:new Date().toISOString() },
+   { onConflict:"id" }
+ );
+ if (error) throw error;
+}
+async function dbDeletePantalla(id) {
+ const { error } = await sb.from("pantallas_cronograma")
+   .update({ deleted:true, updated_at:new Date().toISOString() })
+   .eq("id", id);
+ if (error) throw error;
+}
+async function dbUpsertPantallaConfig(id, fields) {
+ const { error } = await sb.from("pantallas_cronograma").upsert(
+   { id, ...fields, updated_at:new Date().toISOString() },
+   { onConflict:"id" }
+ );
+ if (error) throw error;
+}
+
+async function dbLoadTareas(tablero) {
+ const { data, error } = await sb
+   .from("task_progress")
+   .select("*")
+   .eq("tablero", tablero)
+   .eq("deleted", false);
+ if (error) throw error;
+ const porPantalla = {};
+ (data || []).forEach(r => {
+   if (!porPantalla[r.pantalla_id]) porPantalla[r.pantalla_id] = [];
+   porPantalla[r.pantalla_id].push({
+     id:r.task_id, nombre:r.nombre||"", progreso:r.progreso||0,
+     responsable:r.responsable||"", inicio:r.inicio||"", fin:r.fin||"", comentario:r.comentario||""
+   });
+ });
+ return porPantalla;
+}
+async function dbUpsertTarea(taskId, fields) {
+ const { error } = await sb.from("task_progress").upsert(
+   { task_id:taskId, ...fields, updated_at:new Date().toISOString() },
+   { onConflict:"task_id" }
+ );
+ if (error) throw error;
+}
+
+/* ═══════════════ utilidades de cálculo ═══════════════ */
+function normalizarProgreso(v) {
+ if (v===null||v===undefined||v==="") return 0;
+ const n = parseFloat(v);
+ if (isNaN(n)) return 0;
+ return n<=1 ? Math.round(n*100) : Math.min(100, Math.max(0, Math.round(n)));
+}
+function estadoTarea(p) { return p>=100?"Completada":p>0?"En curso":"Pendiente"; }
+function calcularAvancePantalla(tareas) {
+ if (!tareas.length) return 0;
+ const total = tareas.reduce((s,t) => s + normalizarProgreso(t.progreso), 0);
+ return Math.round(total / tareas.length);
+}
+
+function BarAcum({ label, pct, done, total }) {
+ const col = pct >= 100 ? C.gl : pct >= 60 ? C.gold : pct > 0 ? C.rl : C.g;
+ return (
+<div style={{ display:"flex", alignItems:"center", gap:14 }}>
+<span style={{ fontSize:11, color:C.g, minWidth:250 }}>{label}</span>
+<div style={{ flex:1, maxWidth:260, height:7, background:"rgba(255,255,255,0.1)", borderRadius:99 }}>
+<div style={{ width:`${pct}%`, height:"100%", background:col, borderRadius:99, transition:"width .5s" }}/>
+</div>
+<span style={{ fontSize:15, fontWeight:700, color:col, minWidth:44 }}>{pct}%</span>
+<span style={{ fontSize:10, color:C.g }}>
+       {total === 0 ? "Sin indicadores" : `${done}/${total} completados`}
+</span>
+</div>
+ );
+}
+
+/* ═══════════════════════════════════════════════════════════
+  TableroAvance — replica completa de la página de Avance,
+  con estado y persistencia 100% independientes por tablero.
+  ═══════════════════════════════════════════════════════════ */
+function TableroAvance({ tablero, titulo }) {
+ const [cronograma, setCronograma] = useState([]);
+ const [ld, setLd] = useState(true);
+ const [err, setErr] = useState(null);
+
+ const [expandedP, setExpandedP]   = useState(null);
+ const [editTarea, setEditTarea]   = useState(null);
+ const [newTarea, setNewTarea]     = useState(null);
+ const [newForm, setNewForm]       = useState({ nombre:"", progreso:0, responsable:"", inicio:"", fin:"", comentario:"" });
+ const [busqueda, setBusqueda]     = useState("");
+ const [filtroEtapa, setFiltroEtapa]   = useState("Todas");
+ const [filtroEstado, setFiltroEstado] = useState("Todos");
+ const [filtroRango, setFiltroRango]   = useState("Todos");
+ const [svTarea, setSvTarea]       = useState(null);
+ const [editFechaFin, setEditFechaFin] = useState(null);
+
+ const [showAddPantalla, setShowAddPantalla] = useState(false);
+ const [newPantalla, setNewPantalla] = useState({ pantalla:"", etapa:ETAPAS_LISTA[0] });
+ const [svPantalla, setSvPantalla] = useState(null);
+
+ useEffect(() => {
+   setLd(true);
+   Promise.all([dbLoadPantallas(tablero), dbLoadTareas(tablero)])
+     .then(([pantallas, tareasPorPantalla]) => {
+       setCronograma(pantallas.map(p => ({
+         id:p.id, etapa:p.etapa, pantalla:p.pantalla, fecha_fin:p.fecha_fin || "",
+         tareas: tareasPorPantalla[p.id] || []
+       })));
+       setLd(false);
+     })
+     .catch(e => { setErr("No se pudo conectar con Supabase."); setLd(false); console.error(e); });
+ }, [tablero]);
+
+ const responsablesLista = useMemo(() => {
+   const base = TEAM.map(m => m.name);
+   const extra = [...new Set(cronograma.flatMap(p => p.tareas).map(t => (t.responsable||"").trim()).filter(r => r && !base.includes(r)))];
+   return [...base, ...extra];
+ }, [cronograma]);
+
+ const etapas = [...new Set(cronograma.map(p => p.etapa))];
+
+ /* ── acciones ── */
+ const agregarPantalla = async () => {
+   if (!newPantalla.pantalla.trim()) return alert("El nombre de la pantalla es obligatorio.");
+   if (cronograma.find(p => p.pantalla.toLowerCase() === newPantalla.pantalla.trim().toLowerCase()))
+     return alert("Ya existe una pantalla con ese nombre en este tablero.");
+   const nuevoId = "pnt_" + uid();
+   setSvPantalla("saving");
+   try {
+     await dbUpsertPantalla(nuevoId, { tablero, pantalla:newPantalla.pantalla.trim(), etapa:newPantalla.etapa, orden:cronograma.length, deleted:false });
+     setCronograma(prev => [...prev, { id:nuevoId, etapa:newPantalla.etapa, pantalla:newPantalla.pantalla.trim(), fecha_fin:"", tareas:[] }]);
+     setNewPantalla({ pantalla:"", etapa:ETAPAS_LISTA[0] });
+     setShowAddPantalla(false);
+     setSvPantalla("ok"); setTimeout(()=>setSvPantalla(null),2000);
+   } catch(e) { console.error(e); setSvPantalla("error"); setTimeout(()=>setSvPantalla(null),3000); }
+ };
+
+ const eliminarPantalla = async (p) => {
+   if (!confirm(`¿Eliminar la pantalla "${p.pantalla}"? Esta acción no se puede deshacer.`)) return;
+   setSvPantalla("saving");
+   try {
+     await dbDeletePantalla(p.id);
+     setCronograma(prev => prev.filter(x => x.id !== p.id));
+     setSvPantalla("ok"); setTimeout(()=>setSvPantalla(null),2000);
+   } catch(e) { console.error(e); setSvPantalla("error"); setTimeout(()=>setSvPantalla(null),3000); }
+ };
+
+ const guardarFechaFin = async (p, val) => {
+   try {
+     await dbUpsertPantallaConfig(p.id, { tablero, pantalla:p.pantalla, etapa:p.etapa, fecha_fin:val||null });
+     setCronograma(prev => prev.map(x => x.id===p.id ? { ...x, fecha_fin:val } : x));
+   } catch(e) { console.error(e); }
+   setEditFechaFin(null);
+ };
+
+ const guardarTarea = async (pantalla, tarea, campos) => {
+   const prog = normalizarProgreso(campos.progreso);
+   if (prog<0||prog>100) return alert("El progreso debe ser entre 0 y 100.");
+   if (campos.fin&&campos.inicio&&campos.fin<campos.inicio) return alert("La fecha de fin no puede ser menor a la de inicio.");
+   const payload = { tablero, pantalla_id:pantalla.id, nombre:tarea.nombre, progreso:prog, estado:estadoTarea(prog), responsable:campos.responsable||"", inicio:campos.inicio||null, fin:campos.fin||null, comentario:campos.comentario||"", deleted:false };
+   setSvTarea("saving");
+   try {
+     await dbUpsertTarea(tarea.id, payload);
+     setCronograma(prev => prev.map(p => p.id===pantalla.id ? {
+       ...p, tareas:p.tareas.map(t => t.id===tarea.id ? { ...t, progreso:prog, responsable:campos.responsable||"", inicio:campos.inicio||"", fin:campos.fin||"", comentario:campos.comentario||"" } : t)
+     } : p));
+     setSvTarea("ok"); setTimeout(()=>setSvTarea(null),2000); setEditTarea(null);
+   } catch(e) { console.error(e); setSvTarea("error"); setTimeout(()=>setSvTarea(null),3000); }
+ };
+
+ const borrarTarea = async (pantalla, tarea) => {
+   if (!confirm(`¿Borrar "${tarea.nombre}"?`)) return;
+   setSvTarea("saving");
+   try {
+     await dbUpsertTarea(tarea.id, { tablero, pantalla_id:pantalla.id, nombre:tarea.nombre, progreso:0, estado:"Pendiente", responsable:"", inicio:null, fin:null, comentario:"", deleted:true });
+     setCronograma(prev => prev.map(p => p.id===pantalla.id ? { ...p, tareas:p.tareas.filter(t => t.id!==tarea.id) } : p));
+     setSvTarea("ok"); setTimeout(()=>setSvTarea(null),2000);
+   } catch(e) { console.error(e); setSvTarea("error"); setTimeout(()=>setSvTarea(null),3000); }
+ };
+
+ const agregarTarea = async (pantalla) => {
+   if (!newForm.nombre.trim()) return alert("El nombre del indicador es obligatorio.");
+   const prog = normalizarProgreso(newForm.progreso);
+   if (newForm.fin&&newForm.inicio&&newForm.fin<newForm.inicio) return alert("La fecha de fin no puede ser menor a la de inicio.");
+   const nuevoId = "tsk_" + uid();
+   const payload = { tablero, pantalla_id:pantalla.id, nombre:newForm.nombre, progreso:prog, estado:estadoTarea(prog), responsable:newForm.responsable||"", inicio:newForm.inicio||null, fin:newForm.fin||null, comentario:newForm.comentario||"", deleted:false };
+   setSvTarea("saving");
+   try {
+     await dbUpsertTarea(nuevoId, payload);
+     setCronograma(prev => prev.map(p => p.id===pantalla.id ? {
+       ...p, tareas:[...p.tareas, { id:nuevoId, nombre:newForm.nombre, progreso:prog, responsable:newForm.responsable||"", inicio:newForm.inicio||"", fin:newForm.fin||"", comentario:newForm.comentario||"" }]
+     } : p));
+     setSvTarea("ok"); setTimeout(()=>setSvTarea(null),2000);
+     setNewTarea(null); setNewForm({ nombre:"", progreso:0, responsable:"", inicio:"", fin:"", comentario:"" });
+   } catch(e) { console.error(e); setSvTarea("error"); setTimeout(()=>setSvTarea(null),3000); }
+ };
+
+ /* ── derivados ── */
+ const todasTareas = cronograma.flatMap(p => p.tareas);
+ const avanceGlobal = todasTareas.length ? Math.round(todasTareas.reduce((s,t)=>s+normalizarProgreso(t.progreso),0)/todasTareas.length) : 0;
+
+ const totalInd       = todasTareas.length;
+ const completadosInd = todasTareas.filter(t=>normalizarProgreso(t.progreso)>=100).length;
+ const enCursoInd     = todasTareas.filter(t=>{const v=normalizarProgreso(t.progreso);return v>0&&v<100;}).length;
+ const pendientesInd  = totalInd - completadosInd - enCursoInd;
+
+ const acumDone = completadosInd;
+ const acumPct  = totalInd ? Math.round((completadosInd/totalInd)*100) : 0;
+
+ const statsInd = [
+   { v:totalInd,       l:"Total",       col:C.teal, bg:"rgba(0,188,212,0.12)" },
+   { v:completadosInd, l:"Completados", col:C.gl,   bg:"rgba(76,175,80,0.12)" },
+   { v:enCursoInd,     l:"En curso",    col:C.gold, bg:"rgba(232,168,56,0.12)" },
+   { v:pendientesInd,  l:"Pendientes",  col:C.rl,   bg:"rgba(239,83,80,0.12)" },
+ ];
+
+ const pantallasVisibles = cronograma.filter(p => {
+   const matchBusq   = p.pantalla.toLowerCase().includes(busqueda.toLowerCase());
+   const matchEtapa  = filtroEtapa==="Todas" || p.etapa===filtroEtapa;
+   const avance      = calcularAvancePantalla(p.tareas);
+   const estado      = avance>=100?"Completada":avance>0?"En curso":"Pendiente";
+   const matchEstado = filtroEstado==="Todos" || estado===filtroEstado;
+   const matchRango  = filtroRango==="Todos" || (filtroRango==="0"&&avance===0) || (filtroRango==="1-24"&&avance>=1&&avance<=24) || (filtroRango==="25-50"&&avance>=25&&avance<=50) || (filtroRango==="51-79"&&avance>=51&&avance<=79) || (filtroRango==="80-99"&&avance>=80&&avance<=99) || (filtroRango==="100"&&avance>=100);
+   return matchBusq && matchEtapa && matchEstado && matchRango;
+ });
+
+ const PH = (
+<div style={{ background:C.navy, borderBottom:`3px solid ${C.teal}`, padding:"16px 28px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+<h1 style={{ fontSize:20, fontWeight:300, letterSpacing:1, color:C.w, margin:0 }}>{titulo}</h1>
+<div style={{ display:"flex", alignItems:"center", gap:14 }}>
+       {err && <span style={{ fontSize:10, color:C.rl }}>⚠ {err}</span>}
+<span style={{ fontSize:12, color:C.g }}>RTIC | YPF S.A.</span>
+</div>
+</div>
+ );
+ const PF = (
+<div style={{ background:C.navy, padding:"8px 28px", display:"flex", justifyContent:"space-between", fontSize:10, color:C.g, borderTop:`1px solid ${C.bd}` }}>
+<span>RTIC | Supply Chain | YPF S.A.</span><span>PRIVADO — USO INTERNO</span>
+</div>
+ );
+
+ if (ld) return (
+<div style={{ background:C.navy, minHeight:"60vh", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:14 }}>
+<div style={{ width:36, height:36, border:`3px solid ${C.bd}`, borderTop:`3px solid ${C.teal}`, borderRadius:"50%", animation:"sp 1s linear infinite" }}/>
+<div style={{ color:C.teal, fontSize:13 }}>Cargando {titulo}…</div>
+<style>{`@keyframes sp{to{transform:rotate(360deg)}}`}</style>
+</div>
+ );
+
+ const colAvance = p => { const a=calcularAvancePantalla(p.tareas); return a>=100?C.grn:a>0?C.gold:C.g; };
+ const estadoPantalla = p => { const a=calcularAvancePantalla(p.tareas); return a>=100?"Completada":a>0?"En curso":"Pendiente"; };
+
+ return (
+<div style={{ background:"#e8ecf1" }}>
+     {PH}
+
+     {/* Cabecera de métricas */}
+<div style={{ background:C.navy, padding:"16px 28px", display:"flex", flexDirection:"column", gap:14, borderBottom:`1px solid ${C.bd}` }}>
+<div style={{ display:"flex", alignItems:"center", gap:14 }}>
+<span style={{ fontSize:11, color:C.g, minWidth:250 }}>AVANCE DE INDICADORES (ponderado por avance)</span>
+<div style={{ flex:1, maxWidth:260, height:7, background:"rgba(255,255,255,0.1)", borderRadius:99 }}>
+<div style={{ width:`${avanceGlobal}%`, height:"100%", background:avanceGlobal>=100?C.gl:avanceGlobal>30?C.teal:C.gold, borderRadius:99, transition:"width .4s" }}/>
+</div>
+<span style={{ fontSize:15, fontWeight:700, color:C.teal, minWidth:44 }}>{avanceGlobal}%</span>
+         {svTarea && <span style={{ fontSize:10, color:svTarea==="ok"?C.gl:svTarea==="error"?C.rl:C.gold, marginLeft:"auto" }}>{svTarea==="saving"?"Guardando…":svTarea==="ok"?"✓ Guardado":"⚠ Error al guardar"}</span>}
+         {svPantalla && <span style={{ fontSize:10, color:svPantalla==="ok"?C.gl:svPantalla==="error"?C.rl:C.gold, marginLeft: svTarea?"8px":"auto" }}>{svPantalla==="saving"?"Guardando pantalla…":svPantalla==="ok"?"✓ Pantalla guardada":"⚠ Error"}</span>}
+</div>
+
+<BarAcum label="AVANCE ACUMULADO (completados)" pct={acumPct} done={acumDone} total={totalInd} />
+
+<div style={{ display:"flex", alignItems:"center", gap:10 }}>
+<span style={{ fontSize:11, color:C.g, minWidth:250 }}>TOTAL INDICADORES</span>
+<div style={{ display:"flex", gap:8 }}>
+           {statsInd.map(s=>(
+<div key={s.l} style={{ textAlign:"center", padding:"12px 24px", borderRadius:8, background:s.bg, border:`1px solid ${s.col}44` }}>
+<div style={{ fontSize:36, fontWeight:700, color:s.col, lineHeight:1 }}>{s.v}</div>
+<div style={{ fontSize:11, color:s.col, marginTop:6, letterSpacing:0.5, fontWeight:500 }}>{s.l}</div>
+</div>
+           ))}
+</div>
+</div>
+</div>
+
+     {/* Filtros */}
+<div style={{ padding:"12px 24px", background:C.w, borderBottom:"1px solid #e8ecf1", display:"flex", gap:10, flexWrap:"wrap", alignItems:"center" }}>
+<input value={busqueda} onChange={e=>setBusqueda(e.target.value)} placeholder="🔍 Buscar pantalla..."
+         style={{ padding:"6px 10px", border:"1px solid #dde", borderRadius:4, fontSize:12, width:220 }}/>
+<select value={filtroEtapa} onChange={e=>setFiltroEtapa(e.target.value)}
+         style={{ padding:"6px 10px", border:"1px solid #dde", borderRadius:4, fontSize:12 }}>
+<option value="Todas">Todas las etapas</option>
+         {etapas.map(e=><option key={e} value={e}>{e}</option>)}
+</select>
+<select value={filtroEstado} onChange={e=>setFiltroEstado(e.target.value)}
+         style={{ padding:"6px 10px", border:"1px solid #dde", borderRadius:4, fontSize:12 }}>
+         {["Todos","Pendiente","En curso","Completada"].map(e=><option key={e} value={e}>{e}</option>)}
+</select>
+<select value={filtroRango} onChange={e=>setFiltroRango(e.target.value)}
+         style={{ padding:"6px 10px", border:"1px solid #dde", borderRadius:4, fontSize:12 }}>
+         {[["Todos","Todos los rangos"],["0","0%"],["1-24","1–24%"],["25-50","25–50%"],["51-79","51–79%"],["80-99","80–99%"],["100","100%"]].map(([v,l])=><option key={v} value={v}>{l}</option>)}
+</select>
+<div style={{ display:"flex", flexDirection:"column", gap:4, marginLeft:"auto" }}>
+<span style={{ fontSize:10, fontWeight:700, color:C.g, letterSpacing:1 }}>INDICADORES POR RANGO DE AVANCE</span>
+<div style={{ display:"flex", gap:6 }}>
+           {[["0","0%"],["1-24","1–24%"],["25-50","25–50%"],["51-79","51–79%"],["80-99","80–99%"],["100","100%"]].map(([v,l])=>{
+             const cnt = v==="0"?todasTareas.filter(t=>normalizarProgreso(t.progreso)===0).length
+               :v==="1-24"?todasTareas.filter(t=>{const a=normalizarProgreso(t.progreso);return a>=1&&a<=24;}).length
+               :v==="25-50"?todasTareas.filter(t=>{const a=normalizarProgreso(t.progreso);return a>=25&&a<=50;}).length
+               :v==="51-79"?todasTareas.filter(t=>{const a=normalizarProgreso(t.progreso);return a>=51&&a<=79;}).length
+               :v==="80-99"?todasTareas.filter(t=>{const a=normalizarProgreso(t.progreso);return a>=80&&a<=99;}).length
+               :todasTareas.filter(t=>normalizarProgreso(t.progreso)>=100).length;
+             const active = filtroRango===v;
+             const colMap = {0:C.rl,"1-24":"#ff7043","25-50":C.gold,"51-79":C.teal,"80-99":"#7c4dff","100":C.gl};
+             const cc = colMap[v];
+             return <button key={v} onClick={()=>setFiltroRango(active?"Todos":v)} style={{ padding:"8px 16px", borderRadius:6, border:active?`2px solid ${cc}`:`1px solid #dde`, background:active?`${cc}15`:"#fff", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:2, minWidth:70 }}>
+<span style={{ fontSize:18, fontWeight:700, color:active?cc:"#546e7a", lineHeight:1 }}>{cnt}</span>
+<span style={{ fontSize:10, fontWeight:600, color:active?cc:"#90a4ae" }}>{l}</span>
+</button>;
+           })}
+</div>
+</div>
+</div>
+
+     {/* Cuerpo */}
+<div style={{ padding:"18px 24px" }}>
+       {filtroRango !== "Todos" ? (() => {
+         const allInd = cronograma.flatMap(p=>p.tareas.map(t=>({...t,pantalla:p.pantalla})));
+         const filtered = allInd.filter(t => {
+           const a = normalizarProgreso(t.progreso);
+           return filtroRango==="0"?a===0:filtroRango==="1-24"?(a>=1&&a<=24):filtroRango==="25-50"?(a>=25&&a<=50):filtroRango==="51-79"?(a>=51&&a<=79):filtroRango==="80-99"?(a>=80&&a<=99):a>=100;
+         });
+         const lblRango = filtroRango==="0"?"0%":filtroRango==="1-24"?"1–24%":filtroRango==="25-50"?"25–50%":filtroRango==="51-79"?"51–79%":filtroRango==="80-99"?"80–99%":"100%";
+         return (
+<div style={{ background:C.w, borderRadius:6, overflow:"hidden", border:"1px solid #e0e0e0" }}>
+<div style={{ padding:"12px 16px", background:"#f7f9fb", borderBottom:"1px solid #eee", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+<span style={{ fontSize:13, fontWeight:700, color:C.navy }}>{filtered.length} indicadores en rango {lblRango}</span>
+<button onClick={()=>setFiltroRango("Todos")} style={{ padding:"4px 10px", border:`1px solid ${C.teal}`, borderRadius:4, background:"rgba(0,188,212,0.06)", color:C.teal, fontSize:11, fontWeight:600, cursor:"pointer" }}>← Volver a pantallas</button>
+</div>
+<div style={{ overflowX:"auto" }}>
+<table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
+<thead><tr style={{ background:"#f7f9fb" }}>
+                   {["Pantalla","Indicador","Progreso","Estado","Responsable","Inicio","Fin","Comentario"].map(h=>(
+<th key={h} style={{ padding:"8px", textAlign:"left", color:C.g, fontWeight:600, fontSize:10, borderBottom:"1px solid #eee" }}>{h}</th>
+                   ))}
+</tr></thead>
+<tbody>
+                   {filtered.map(t => {
+                     const prog = normalizarProgreso(t.progreso);
+                     const est = estadoTarea(prog);
+                     return (
+<tr key={t.id} style={{ borderBottom:"1px solid #f5f5f5" }}>
+<td style={{ padding:"8px", color:C.teal, fontSize:10, fontWeight:600 }}>{t.pantalla}</td>
+<td style={{ padding:"8px", color:C.navy, maxWidth:220 }}>{t.nombre}</td>
+<td style={{ padding:"8px" }}>
+<div style={{ display:"flex", alignItems:"center", gap:5 }}>
+<div style={{ width:60, height:5, background:"#f0f0f0", borderRadius:99 }}>
+<div style={{ width:`${prog}%`, height:"100%", background:prog>=100?C.grn:prog>0?C.gold:C.g, borderRadius:99 }}/>
+</div>
+<span style={{ fontWeight:700, color:prog>=100?C.grn:prog>0?"#b8860b":C.g }}>{prog}%</span>
+</div>
+</td>
+<td style={{ padding:"8px" }}>
+<span style={{ padding:"2px 6px", borderRadius:3, fontSize:9, fontWeight:700, background:est==="Completada"?"rgba(46,125,50,0.1)":est==="En curso"?"rgba(232,168,56,0.1)":"rgba(144,164,174,0.1)", color:est==="Completada"?C.grn:est==="En curso"?"#b8860b":C.g }}>{est}</span>
+</td>
+<td style={{ padding:"8px", color:"#546e7a" }}>{t.responsable}</td>
+<td style={{ padding:"8px", color:"#90a4ae" }}>{t.inicio}</td>
+<td style={{ padding:"8px", color:"#90a4ae" }}>{t.fin}</td>
+<td style={{ padding:"8px", color:C.navy, fontStyle:"italic", maxWidth:160 }}>{t.comentario||"—"}</td>
+</tr>
+                     );
+                   })}
+</tbody>
+</table>
+</div>
+             {filtered.length===0 && <div style={{ padding:20, textAlign:"center", color:"#90a4ae", fontSize:12 }}>Sin indicadores en este rango.</div>}
+</div>
+         );
+       })() : <React.Fragment>
+       {pantallasVisibles.map(p => {
+         const avance      = calcularAvancePantalla(p.tareas);
+         const estado      = estadoPantalla(p);
+         const col         = colAvance(p);
+         const isExp       = expandedP === p.id;
+         const completadas = p.tareas.filter(t=>normalizarProgreso(t.progreso)>=100).length;
+         const enCurso     = p.tareas.filter(t=>{const v=normalizarProgreso(t.progreso);return v>0&&v<100;}).length;
+         const pendientes  = p.tareas.filter(t=>normalizarProgreso(t.progreso)===0).length;
+         const isAddingHere = newTarea === p.id;
+         return (
+<div key={p.id} style={{ background:C.w, borderRadius:6, marginBottom:10, border:`1px solid ${isExp?C.teal:"#e0e0e0"}`, overflow:"hidden", boxShadow:"0 1px 4px rgba(0,0,0,0.05)" }}>
+<div style={{ padding:"14px 18px", display:"flex", alignItems:"center", gap:14 }}>
+<div onClick={()=>{ setExpandedP(isExp?null:p.id); if(isExp){setNewTarea(null);setEditTarea(null);} }} style={{ flex:1, cursor:"pointer" }}>
+<div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+<span style={{ fontSize:14, fontWeight:700, color:C.navy }}>{p.pantalla}</span>
+<span style={{ fontSize:10, color:C.g }}>{p.etapa}</span>
+<span style={{ padding:"2px 8px", borderRadius:99, fontSize:9, fontWeight:700, background:estado==="Completada"?"rgba(46,125,50,0.1)":estado==="En curso"?"rgba(232,168,56,0.1)":"rgba(144,164,174,0.15)", color:estado==="Completada"?C.grn:estado==="En curso"?"#b8860b":C.g, marginLeft:"auto" }}>{estado}</span>
+</div>
+<div style={{ display:"flex", alignItems:"center", gap:8 }}>
+<div style={{ flex:1, height:8, background:"#f0f0f0", borderRadius:99 }}>
+<div style={{ width:`${avance}%`, height:"100%", background:col, borderRadius:99, transition:"width .4s" }}/>
+</div>
+<span style={{ fontSize:13, fontWeight:700, color:col, minWidth:38, textAlign:"right" }}>{avance}%</span>
+</div>
+<div style={{ display:"flex", gap:16, marginTop:6, fontSize:10, color:C.g, alignItems:"center", flexWrap:"wrap" }}>
+<span>📋 {p.tareas.length} indicadores</span>
+<span style={{ color:C.grn }}>✓ {completadas}</span>
+<span style={{ color:"#b8860b" }}>◑ {enCurso}</span>
+<span>○ {pendientes}</span>
+<span style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:4 }}>
+                     🗓 Fecha fin:
+                     {editFechaFin === p.id
+                       ? <span onClick={e=>e.stopPropagation()} style={{ display:"flex", gap:4, alignItems:"center" }}>
+<input type="date" defaultValue={p.fecha_fin} id={`ff-${tablero}-${p.id}`}
+                             style={{ padding:"2px 5px", border:"1px solid #dde", borderRadius:3, fontSize:10 }}/>
+<button onClick={e=>{ e.stopPropagation(); const val=document.getElementById(`ff-${tablero}-${p.id}`).value; guardarFechaFin(p, val); }}
+                             style={{ padding:"2px 7px", background:C.teal, color:C.w, border:"none", borderRadius:3, fontSize:10, fontWeight:700, cursor:"pointer" }}>✓</button>
+<button onClick={e=>{e.stopPropagation();setEditFechaFin(null);}} style={{ padding:"2px 6px", background:"#eee", border:"none", borderRadius:3, fontSize:10, cursor:"pointer" }}>✕</button>
+</span>
+                       : <span onClick={e=>{e.stopPropagation();setEditFechaFin(p.id);}} style={{ cursor:"pointer", color:p.fecha_fin?C.navy:"#bbb", textDecoration:"underline dotted" }}>
+                           {p.fecha_fin || "Sin definir"}
+</span>
+                     }
+</span>
+</div>
+</div>
+<button onClick={e=>{ e.stopPropagation(); eliminarPantalla(p); }} title="Eliminar pantalla"
+                 style={{ padding:"5px 9px", border:"1px solid rgba(198,40,40,0.2)", background:"rgba(198,40,40,0.06)", color:C.red, borderRadius:4, fontSize:12, cursor:"pointer", flexShrink:0 }}>🗑️</button>
+<span onClick={()=>{ setExpandedP(isExp?null:p.id); if(isExp){setNewTarea(null);setEditTarea(null);} }} style={{ fontSize:16, color:C.g, userSelect:"none", cursor:"pointer" }}>{isExp?"▲":"▼"}</span>
+</div>
+
+             {isExp && (
+<div style={{ borderTop:`1px solid #f0f0f0` }}>
+<div style={{ overflowX:"auto" }}>
+<table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
+<thead><tr style={{ background:"#f7f9fb" }}>
+                       {["Indicador","Progreso","Estado","Responsable","Inicio","Fin","Comentario",""].map(h=>(
+<th key={h} style={{ padding:"7px 8px", textAlign:"left", color:C.g, fontWeight:600, fontSize:10, borderBottom:"1px solid #eee" }}>{h}</th>
+                       ))}
+</tr></thead>
+<tbody>
+                       {p.tareas.map(t => {
+                         const prog = normalizarProgreso(t.progreso);
+                         const est = estadoTarea(prog);
+                         const isEditing = editTarea?.id === t.id;
+                         return (
+<tr key={t.id} style={{ borderBottom:"1px solid #f5f5f5", background:isEditing?"#fffdf0":"transparent" }}>
+<td style={{ padding:"8px", color:C.navy, maxWidth:200 }}>{t.nombre}</td>
+<td style={{ padding:"8px", minWidth:100 }}>
+                               {isEditing
+                                 ? <input type="number" min={0} max={100} value={editTarea.progreso} onChange={e=>setEditTarea(p=>({...p,progreso:e.target.value}))}
+                                     style={{ width:60, padding:"3px 5px", border:"1px solid #dde", borderRadius:3, fontSize:11 }}/>
+                                 : <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+<div style={{ width:60, height:5, background:"#f0f0f0", borderRadius:99 }}>
+<div style={{ width:`${prog}%`, height:"100%", background:prog>=100?C.grn:prog>0?C.gold:C.g, borderRadius:99 }}/>
+</div>
+<span style={{ fontWeight:700, color:prog>=100?C.grn:prog>0?"#b8860b":C.g }}>{prog}%</span>
+</div>
+                               }
+</td>
+<td style={{ padding:"8px" }}>
+<span style={{ padding:"2px 6px", borderRadius:3, fontSize:9, fontWeight:700, background:est==="Completada"?"rgba(46,125,50,0.1)":est==="En curso"?"rgba(232,168,56,0.1)":"rgba(144,164,174,0.1)", color:est==="Completada"?C.grn:est==="En curso"?"#b8860b":C.g }}>{est}</span>
+</td>
+<td style={{ padding:"8px" }}>
+                               {isEditing
+                                 ? <><input value={editTarea.responsable} onChange={e=>setEditTarea(p=>({...p,responsable:e.target.value}))} list={`resp-${tablero}`}
+                                     style={{ width:110, padding:"3px 5px", border:"1px solid #dde", borderRadius:3, fontSize:11 }}/>
+<datalist id={`resp-${tablero}`}>{responsablesLista.map(r=><option key={r} value={r}/>)}</datalist></>
+                                 : <span style={{ color:"#546e7a" }}>{t.responsable}</span>}
+</td>
+<td style={{ padding:"8px" }}>
+                               {isEditing
+                                 ? <input type="date" value={editTarea.inicio} onChange={e=>setEditTarea(p=>({...p,inicio:e.target.value}))}
+                                     style={{ padding:"3px 5px", border:"1px solid #dde", borderRadius:3, fontSize:11 }}/>
+                                 : <span style={{ color:"#90a4ae" }}>{t.inicio}</span>}
+</td>
+<td style={{ padding:"8px" }}>
+                               {isEditing
+                                 ? <input type="date" value={editTarea.fin} onChange={e=>setEditTarea(p=>({...p,fin:e.target.value}))}
+                                     style={{ padding:"3px 5px", border:"1px solid #dde", borderRadius:3, fontSize:11 }}/>
+                                 : <span style={{ color:"#90a4ae" }}>{t.fin}</span>}
+</td>
+<td style={{ padding:"8px", maxWidth:160 }}>
+                               {isEditing
+                                 ? <input value={editTarea.comentario} onChange={e=>setEditTarea(p=>({...p,comentario:e.target.value}))}
+                                     style={{ width:"100%", padding:"3px 5px", border:"1px solid #dde", borderRadius:3, fontSize:11 }}/>
+                                 : <span style={{ color:C.navy, fontStyle:"italic" }}>{t.comentario||"—"}</span>}
+</td>
+<td style={{ padding:"8px", whiteSpace:"nowrap" }}>
+                               {isEditing
+                                 ? <div style={{ display:"flex", gap:4 }}>
+<button onClick={()=>guardarTarea(p,t,editTarea)} style={{ padding:"3px 8px", background:C.teal, color:C.w, border:"none", borderRadius:3, fontSize:10, fontWeight:700, cursor:"pointer" }}>✓</button>
+<button onClick={()=>setEditTarea(null)} style={{ padding:"3px 7px", background:"#eee", border:"none", borderRadius:3, fontSize:10, cursor:"pointer" }}>✕</button>
+</div>
+                                 : <div style={{ display:"flex", gap:4 }}>
+<button onClick={()=>setEditTarea({id:t.id,progreso:prog,responsable:t.responsable,inicio:t.inicio,fin:t.fin,comentario:t.comentario})} style={{ padding:"3px 8px", background:C.nl, color:C.gl2, border:"none", borderRadius:3, fontSize:10, cursor:"pointer" }}>✏️</button>
+<button onClick={()=>borrarTarea(p,t)} style={{ padding:"3px 8px", background:"rgba(198,40,40,0.08)", color:C.red, border:"none", borderRadius:3, fontSize:10, cursor:"pointer" }}>🗑️</button>
+</div>
+                               }
+</td>
+</tr>
+                         );
+                       })}
+</tbody>
+</table>
+</div>
+
+                 {isAddingHere
+                   ? <div style={{ padding:"12px 16px", background:"rgba(0,188,212,0.04)", borderTop:"1px solid #e0f7fa" }}>
+<div style={{ fontSize:11, fontWeight:700, color:C.teal, marginBottom:8 }}>+ Nuevo indicador en {p.pantalla}</div>
+<div style={{ display:"grid", gridTemplateColumns:"2fr 80px 1fr 1fr 1fr 2fr auto", gap:6, alignItems:"center" }}>
+<input value={newForm.nombre} onChange={e=>setNewForm(f=>({...f,nombre:e.target.value}))} placeholder="Nombre del indicador *"
+                           style={{ padding:"5px 7px", border:`1px solid ${newForm.nombre?"#dde":C.rl}`, borderRadius:4, fontSize:11, fontFamily:"inherit" }}/>
+<input type="number" min={0} max={100} value={newForm.progreso} onChange={e=>setNewForm(f=>({...f,progreso:e.target.value}))}
+                           style={{ padding:"5px 7px", border:"1px solid #dde", borderRadius:4, fontSize:11 }}/>
+<input value={newForm.responsable} onChange={e=>setNewForm(f=>({...f,responsable:e.target.value}))} placeholder="Responsable" list={`resp-${tablero}`}
+                           style={{ padding:"5px 7px", border:"1px solid #dde", borderRadius:4, fontSize:11, fontFamily:"inherit" }}/>
+<input type="date" value={newForm.inicio} onChange={e=>setNewForm(f=>({...f,inicio:e.target.value}))}
+                           style={{ padding:"5px 7px", border:"1px solid #dde", borderRadius:4, fontSize:11 }}/>
+<input type="date" value={newForm.fin} onChange={e=>setNewForm(f=>({...f,fin:e.target.value}))}
+                           style={{ padding:"5px 7px", border:"1px solid #dde", borderRadius:4, fontSize:11 }}/>
+<input value={newForm.comentario} onChange={e=>setNewForm(f=>({...f,comentario:e.target.value}))} placeholder="Comentario"
+                           style={{ padding:"5px 7px", border:"1px solid #dde", borderRadius:4, fontSize:11, fontFamily:"inherit" }}/>
+<div style={{ display:"flex", gap:4 }}>
+<button onClick={()=>agregarTarea(p)} style={{ padding:"5px 10px", background:C.teal, color:C.w, border:"none", borderRadius:4, fontSize:11, fontWeight:700, cursor:"pointer" }}>Guardar</button>
+<button onClick={()=>{ setNewTarea(null); setNewForm({nombre:"",progreso:0,responsable:"",inicio:"",fin:"",comentario:""}); }} style={{ padding:"5px 8px", background:"#eee", border:"none", borderRadius:4, fontSize:11, cursor:"pointer" }}>✕</button>
+</div>
+</div>
+</div>
+                   : <div style={{ padding:"8px 16px", borderTop:"1px solid #f0f0f0" }}>
+<button onClick={()=>{ setNewTarea(p.id); setEditTarea(null); setNewForm({nombre:"",progreso:0,responsable:"",inicio:"",fin:"",comentario:""}); }}
+                         style={{ padding:"5px 12px", border:`1px dashed ${C.teal}`, borderRadius:4, background:"rgba(0,188,212,0.04)", color:C.teal, fontSize:11, fontWeight:600, cursor:"pointer" }}>
+                         + Agregar indicador
+</button>
+</div>
+                 }
+                 {p.tareas.length===0 && !isAddingHere && (
+<div style={{ padding:16, textAlign:"center", color:"#90a4ae", fontSize:11, fontStyle:"italic" }}>Sin indicadores cargados</div>
+                 )}
+</div>
+             )}
+</div>
+         );
+       })}
+
+       {pantallasVisibles.length===0 && !showAddPantalla && (
+<div style={{ textAlign:"center", padding:40, color:"#90a4ae", fontSize:13 }}>
+           {cronograma.length===0 ? "Este tablero está vacío. Agregá tu primera pantalla abajo." : "No se encontraron pantallas con esos filtros."}
+</div>
+       )}
+
+<div style={{ marginTop:8 }}>
+         {showAddPantalla ? (
+<div style={{ background:C.w, borderRadius:6, border:`2px dashed ${C.teal}`, padding:"18px 20px" }}>
+<div style={{ fontSize:13, fontWeight:700, color:C.teal, marginBottom:14 }}>+ Nueva pantalla en {titulo}</div>
+<div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12 }}>
+<div>
+<label style={{ fontSize:10, fontWeight:600, color:C.g, display:"block", marginBottom:4 }}>NOMBRE DE LA PANTALLA *</label>
+<input value={newPantalla.pantalla} onChange={e=>setNewPantalla(f=>({...f,pantalla:e.target.value}))} placeholder="Ej: Gestión de Contratos"
+                   style={{ width:"100%", padding:"7px 10px", border:`1px solid ${newPantalla.pantalla?"#dde":C.rl}`, borderRadius:4, fontSize:12, fontFamily:"inherit" }}/>
+</div>
+<div>
+<label style={{ fontSize:10, fontWeight:600, color:C.g, display:"block", marginBottom:4 }}>ETAPA</label>
+<select value={newPantalla.etapa} onChange={e=>setNewPantalla(f=>({...f,etapa:e.target.value}))}
+                   style={{ width:"100%", padding:"7px 10px", border:"1px solid #dde", borderRadius:4, fontSize:12, background:"#fff" }}>
+                   {ETAPAS_LISTA.map(et=><option key={et} value={et}>{et}</option>)}
+</select>
+</div>
+</div>
+<div style={{ display:"flex", gap:8 }}>
+<button onClick={agregarPantalla} style={{ padding:"8px 20px", background:C.teal, color:C.w, border:"none", borderRadius:4, fontSize:12, fontWeight:700, cursor:"pointer" }}>Guardar pantalla</button>
+<button onClick={()=>{ setShowAddPantalla(false); setNewPantalla({ pantalla:"", etapa:ETAPAS_LISTA[0] }); }} style={{ padding:"8px 14px", background:"#eee", border:"none", borderRadius:4, fontSize:12, cursor:"pointer" }}>Cancelar</button>
+</div>
+</div>
+         ) : (
+<button onClick={()=>setShowAddPantalla(true)}
+             style={{ width:"100%", padding:"14px", border:`2px dashed ${C.teal}`, borderRadius:6, background:"rgba(0,188,212,0.04)", color:C.teal, fontSize:13, fontWeight:600, cursor:"pointer", letterSpacing:0.3 }}>
+             + Agregar nueva pantalla a {titulo}
+</button>
+         )}
+</div>
+</React.Fragment>}
+</div>
+     {PF}
+</div>
+ );
+}
+
+/* ═══════════════ App: login + navegación de 3 tableros ═══════════════ */
+function App() {
+ const [auth, setAuth] = useState(false);
+ const [pwd, setPwd]   = useState("");
+ const [pwdErr, setPwdErr] = useState(false);
+ const APP_PASS = "RTIC2026";
+ const [activo, setActivo] = useState("avance1");
+
+ if (!auth) return (
+<div style={{ fontFamily:"'Segoe UI',sans-serif", background:C.navy, minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center" }}>
+<div style={{ background:C.nl, border:`1px solid ${C.bd}`, borderRadius:8, padding:"40px 36px", maxWidth:360, width:"100%", textAlign:"center" }}>
+<h1 style={{ fontSize:20, fontWeight:300, color:C.w, marginBottom:6 }}>RTIC Dashboard</h1>
+<div style={{ width:60, height:3, background:C.teal, margin:"0 auto 24px" }}/>
+<div style={{ fontSize:11, color:C.g, marginBottom:18 }}>Ingresá la contraseña para continuar</div>
+<input type="password" value={pwd}
+         onChange={e=>{ setPwd(e.target.value); setPwdErr(false); }}
+         onKeyDown={e=>{ if(e.key==="Enter"){ if(pwd===APP_PASS){setAuth(true);}else{setPwdErr(true);} } }}
+         placeholder="Contraseña"
+         style={{ width:"100%", padding:"10px 14px", border:`1px solid ${pwdErr?C.rl:C.bd}`, borderRadius:4, fontSize:13, background:"rgba(255,255,255,0.05)", color:C.w, outline:"none", marginBottom:12, boxSizing:"border-box" }}/>
+       {pwdErr && <div style={{ fontSize:11, color:C.rl, marginBottom:10 }}>Contraseña incorrecta</div>}
+<button onClick={()=>{ if(pwd===APP_PASS){setAuth(true);}else{setPwdErr(true);} }}
+         style={{ width:"100%", padding:"10px", background:C.teal, color:C.w, border:"none", borderRadius:4, fontSize:13, fontWeight:600, cursor:"pointer" }}>Ingresar</button>
+<div style={{ fontSize:9, color:C.g, marginTop:16 }}>PRIVADO — USO INTERNO</div>
+</div>
+</div>
+ );
+
+ const tab = TABLEROS.find(t => t.id === activo);
+
+ return (
+<div style={{ fontFamily:"'Segoe UI','Helvetica Neue',sans-serif", background:"#e8ecf1", minHeight:"100vh" }}>
+<div style={{ background:C.navy, display:"flex", alignItems:"center", padding:"0 10px", borderBottom:`2px solid ${C.teal}`, position:"sticky", top:0, zIndex:100, flexWrap:"wrap" }}>
+       {TABLEROS.map(t => (
+<button key={t.id} onClick={()=>setActivo(t.id)}
+           style={{ padding:"12px 18px", border:"none", background:activo===t.id?C.nl:"transparent", color:activo===t.id?C.teal:C.gl2, fontSize:13, fontWeight:activo===t.id?600:400, cursor:"pointer", borderBottom:activo===t.id?`2px solid ${C.teal}`:"2px solid transparent" }}>
+           {t.label}
+</button>
+       ))}
+</div>
+     {/* key fuerza remontaje al cambiar de tablero → estado y datos totalmente aislados */}
+<TableroAvance key={tab.id} tablero={tab.id} titulo={tab.titulo} />
+</div>
+ );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
